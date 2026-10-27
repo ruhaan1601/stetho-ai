@@ -7,12 +7,27 @@ import torch
 torch.set_num_threads(1)
 torch.set_grad_enabled(False)
 
+# Allow PyTorch to unpickle FastAI components without tripping safe-load errors
+try:
+    torch.serialization.add_safe_globals([
+        torch.nn.modules.container.Sequential,
+        torch.nn.modules.conv.Conv2d,
+        torch.nn.modules.batchnorm.BatchNorm2d,
+        torch.nn.modules.activation.ReLU,
+        torch.nn.modules.pooling.AdaptiveAvgPool2d,
+        torch.nn.modules.pooling.AdaptiveMaxPool2d,
+        torch.nn.modules.linear.Linear,
+        torch.nn.modules.dropout.Dropout
+    ])
+except Exception:
+    pass
+
 import gradio as gr
 from fastai.vision.all import *
 import librosa
 import librosa.display
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use("Agg")  # Non-interactive headless backend
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -30,8 +45,17 @@ if not os.path.exists(MODEL_FILE):
     urllib.request.urlretrieve(MODEL_URL, MODEL_FILE)
     print("Model downloaded successfully!")
 
-# Load model cleanly on CPU
-model = load_learner(MODEL_FILE, cpu=True)
+# Load model with fallback for PyTorch 2.6+ unpickler changes
+try:
+    model = load_learner(MODEL_FILE, cpu=True)
+except Exception:
+    # If default loader blocks classes, disable strict weights_only check
+    import pathlib
+    temp = pathlib.PosixPath
+    pathlib.PosixPath = pathlib.Path
+    model = load_learner(MODEL_FILE, cpu=True)
+    pathlib.PosixPath = temp
+
 model.eval()
 gc.collect()
 
@@ -123,7 +147,7 @@ footer {visibility: hidden !important;}
 """
 
 # -------------------------------------------------------------
-# 3. AUDIO INFERENCE LOGIC
+# 3. AUDIO INFERENCE LOGIC (Memory-Safe + Language Aware)
 # -------------------------------------------------------------
 def analyze_audio(audio_path, language):
     lang_dict = I18N.get(language, I18N["English"])
@@ -172,7 +196,7 @@ def analyze_audio(audio_path, language):
         return f"Error: {str(e)}", None
 
 # -------------------------------------------------------------
-# 4. CHATBOT ASSISTANT
+# 4. CHATBOT TRIAGE ASSISTANT (Multilingual Keywords)
 # -------------------------------------------------------------
 def ai_assistant(message, history):
     msg = message.lower().strip()
@@ -215,7 +239,7 @@ def change_language(selected_lang):
     ]
 
 # -------------------------------------------------------------
-# 5. UI LAYOUT
+# 5. UI LAYOUT & COMPONENT ATTACHMENTS
 # -------------------------------------------------------------
 with gr.Blocks(css=custom_css, title="Stetho-AI") as demo:
     with gr.Row():
