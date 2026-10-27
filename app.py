@@ -1,18 +1,20 @@
 import os
 import gc
 import sys
+import types
 import urllib.request
 import torch
 
-# Force single-thread execution and disable gradient tracking to stay under 512MB RAM
+# Limit CPU threads and turn off gradient calculation to stay under 512MB RAM
 torch.set_num_threads(1)
 torch.set_grad_enabled(False)
 
 # -------------------------------------------------------------
-# FIX FOR 'fasttransform' UNPICKLE ALIAS
+# FIX FOR 'fasttransform.transform' UNPICKLE ALIAS
 # -------------------------------------------------------------
 import fastcore.transform
-sys.modules['fasttransform'] = fastcore.transform
+sys.modules['fasttransform'] = fastcore
+sys.modules['fasttransform.transform'] = fastcore.transform
 
 import gradio as gr
 from fastai.vision.all import *
