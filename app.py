@@ -1,7 +1,6 @@
 import os
 import gc
 import sys
-import types
 import urllib.request
 import torch
 
@@ -10,10 +9,16 @@ torch.set_num_threads(1)
 torch.set_grad_enabled(False)
 
 # -------------------------------------------------------------
-# FIX FOR 'fasttransform.transform' UNPICKLE ALIAS
+# ROBUST COMPATIBILITY FIX FOR SERIALIZED TRANSFORMS
 # -------------------------------------------------------------
 import fastcore.transform
-sys.modules['fasttransform'] = fastcore
+
+class CompatibilityTransform(fastcore.transform.Transform):
+    def __init__(self, f=None, **kwargs):
+        super().__init__(enc=f, **kwargs)
+
+fastcore.transform.Transform = CompatibilityTransform
+sys.modules['fasttransform'] = fastcore.transform
 sys.modules['fasttransform.transform'] = fastcore.transform
 
 import gradio as gr
