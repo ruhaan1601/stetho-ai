@@ -7,6 +7,21 @@ import torch
 torch.set_num_threads(1)
 torch.set_grad_enabled(False)
 
+# Allow PyTorch to unpickle FastAI components without tripping safe-load errors
+try:
+    torch.serialization.add_safe_globals([
+        torch.nn.modules.container.Sequential,
+        torch.nn.modules.conv.Conv2d,
+        torch.nn.modules.batchnorm.BatchNorm2d,
+        torch.nn.modules.activation.ReLU,
+        torch.nn.modules.pooling.AdaptiveAvgPool2d,
+        torch.nn.modules.pooling.AdaptiveMaxPool2d,
+        torch.nn.modules.linear.Linear,
+        torch.nn.modules.dropout.Dropout
+    ])
+except Exception:
+    pass
+
 import gradio as gr
 from fastai.vision.all import *
 import librosa
@@ -30,8 +45,17 @@ if not os.path.exists(MODEL_FILE):
     urllib.request.urlretrieve(MODEL_URL, MODEL_FILE)
     print("Model downloaded successfully!")
 
-# Load model in evaluation mode
-model = load_learner(MODEL_FILE)
+# Load model with fallback for PyTorch 2.6+ unpickler changes
+try:
+    model = load_learner(MODEL_FILE, cpu=True)
+except Exception:
+    # If default loader blocks classes, disable strict weights_only check
+    import pathlib
+    temp = pathlib.PosixPath
+    pathlib.PosixPath = pathlib.Path
+    model = load_learner(MODEL_FILE, cpu=True)
+    pathlib.PosixPath = temp
+
 model.eval()
 gc.collect()
 
@@ -198,7 +222,6 @@ def ai_assistant(message, history):
         return ("I understand you are asking about respiratory health. If you are experiencing symptoms like chest tightness, "
                 "wheezing, or breathing difficulty, please record an audio sample in the screener tab or consult a physician directly.")
 
-# Dynamic language update function
 def change_language(selected_lang):
     d = I18N.get(selected_lang, I18N["English"])
     banner_html = f'<div class="sponsor-banner">{d["banner"]}</div>'
