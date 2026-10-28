@@ -1,6 +1,5 @@
 import os
 import gc
-import sys
 import urllib.request
 import torch
 
@@ -8,20 +7,8 @@ import torch
 torch.set_num_threads(1)
 torch.set_grad_enabled(False)
 
-# -------------------------------------------------------------
-# ROBUST COMPATIBILITY FIX FOR SERIALIZED TRANSFORMS
-# -------------------------------------------------------------
-import fastcore.transform
-
-class CompatibilityTransform(fastcore.transform.Transform):
-    def __init__(self, f=None, **kwargs):
-        super().__init__(enc=f, **kwargs)
-
-fastcore.transform.Transform = CompatibilityTransform
-sys.modules['fasttransform'] = fastcore.transform
-sys.modules['fasttransform.transform'] = fastcore.transform
-
 import gradio as gr
+import fasttransform
 from fastai.vision.all import *
 import librosa
 import librosa.display
@@ -29,6 +16,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+from google import genai
+from google.genai import types
 
 # -------------------------------------------------------------
 # 1. AUTO-DOWNLOAD MODEL FROM GITHUB RELEASE
@@ -44,17 +34,63 @@ if not os.path.exists(MODEL_FILE):
     urllib.request.urlretrieve(MODEL_URL, MODEL_FILE)
     print("Model downloaded successfully!")
 
-# Load model cleanly on CPU
+# Load acoustic learner cleanly on CPU
 model = load_learner(MODEL_FILE, cpu=True)
 model.eval()
 gc.collect()
 
 # -------------------------------------------------------------
-# 2. LOCALIZATION DICTIONARY (English, Hindi, Spanish)
+# 2. GEMINI LIVE CHATBOT CLIENT INITIALIZATION
+# -------------------------------------------------------------
+gemini_api_key = os.environ.get("GEMINI_API_KEY")
+ai_client = genai.Client(api_key=gemini_api_key) if gemini_api_key else None
+
+SYSTEM_INSTRUCTION = """
+You are the certified clinical triage guide for 'stethol.com', an advanced acoustic respiratory screening platform.
+Your goals:
+- Discuss cough types (dry, wet, paroxysmal, barky), lung sounds (wheezing, crackles, stridor), and respiratory comfort tips.
+- Automatically respond in whatever language the user asks in (English, Hindi, Hinglish, Tamil, Telugu, etc.).
+- Always maintain clear triage boundaries: provide informational triage, not a formal medical diagnosis.
+- If symptoms indicate an emergency (shortness of breath at rest, blood in sputum, chest pain, high fever >3 days), urge immediate consultation with a doctor or emergency services.
+- Seamlessly point users to stethol.com's partner services (ordering medicine or consulting an online doctor) when appropriate.
+- Keep answers warm, concise, and cleanly structured with bullet points.
+"""
+
+def dynamic_chat(message, history):
+    if not ai_client:
+        return "⚠️ Chatbot API key not detected. Please verify GEMINI_API_KEY is configured in your Render Environment settings."
+    
+    try:
+        # Reconstruct chat history so Gemini has multi-turn context
+        contents = []
+        for turn in history:
+            user_msg = turn[0]
+            bot_msg = turn[1]
+            if user_msg:
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=str(user_msg))]))
+            if bot_msg:
+                contents.append(types.Content(role="model", parts=[types.Part.from_text(text=str(bot_msg))]))
+        
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=str(message))]))
+
+        response = ai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.3
+            )
+        )
+        return response.text
+    except Exception as e:
+        return f"Service temporarily busy. Please try again shortly. (Error: {str(e)})"
+
+# -------------------------------------------------------------
+# 3. LOCALIZATION DICTIONARY (English, Hindi, Tamil, Telugu)
 # -------------------------------------------------------------
 I18N = {
     "English": {
-        "title": "# 🩺 **Stetho-AI**",
+        "title": "# 🩺 **stethol.com**",
         "subtitle": "### *Advanced Acoustic Respiratory Screening & Clinical Triage*",
         "banner": "📢 SPONSORED: Get 20% Off at 1mg & Apollo Pharmacy with Code: HEALTH20",
         "tab_screener": "🎙️ Audio Screener",
@@ -74,7 +110,7 @@ I18N = {
         "fake": "🎭 Voluntary / Simulated Cough Detected"
     },
     "हिन्दी (Hindi)": {
-        "title": "# 🩺 **Stetho-AI**",
+        "title": "# 🩺 **stethol.com**",
         "subtitle": "### *उन्नत ध्वनिक श्वसन जांच एवं नैदानिक सहायता*",
         "banner": "📢 प्रायोजित: 1mg और अपोलो फार्मेसी पर 20% छूट पाएं | कोड: HEALTH20",
         "tab_screener": "🎙️ ऑडियो जांच",
@@ -93,25 +129,45 @@ I18N = {
         "normal": "✅ सामान्य श्वसन ध्वनि / वायुमार्ग साफ है",
         "fake": "🎭 स्वैच्छिक / बनावटी खांसी पहचानी गई"
     },
-    "Español": {
-        "title": "# 🩺 **Stetho-AI**",
-        "subtitle": "### *Detección Acústica Respiratoria y Triaje Clínico*",
-        "banner": "📢 PATROCINADO: 20% de descuento en farmacias asociadas | Código: HEALTH20",
-        "tab_screener": "🎙️ Analizador de Audio",
-        "tab_chat": "💬 Guía Virtual de Salud",
-        "audio_label": "Grabar sonido de tos o respiración",
-        "btn_analyze": "⚡ Analizar Firma Acústica",
-        "partner_header": "### 🏥 Servicios Médicos Asociados",
-        "btn_pharmacy": "💊 Pedir Medicamentos",
-        "btn_doctor": "👨‍⚕️ Consultar Médico Online",
-        "res_label": "Resultado de la Evaluación",
-        "spec_label": "Espectrograma de Frecuencia Mel",
-        "ad_box": '<small style="color:gray;">PUBLICIDAD</small><p><strong>Mascarillas N95 y Nebulizadores</strong> — Entrega el mismo día.</p>',
-        "quiet_err": "⚠️ Audio demasiado bajo. Acerque el micrófono e intente de nuevo.",
-        "input_err": "⚠️ Por favor, grabe o suba un audio primero.",
-        "patho": "🚨 Anomalía Respiratoria Detectada (Sibilancia / Estertor)",
-        "normal": "✅ Sonido Respiratorio Normal / Vías Aéreas Despejadas",
-        "fake": "🎭 Tos Voluntaria / Simulada Detectada"
+    "தமிழ் (Tamil)": {
+        "title": "# 🩺 **stethol.com**",
+        "subtitle": "### *மேம்பட்ட ஒலி அடிப்படையிலான சுவாசப் பரிசோதனை மற்றும் வழிகாட்டல்*",
+        "banner": "📢 விளம்பரம்: 1mg மற்றும் அப்பல்லோ பார்மசியில் 20% தள்ளுபடி பெற குறியீடு: HEALTH20",
+        "tab_screener": "🎙️ ஆடியோ பரிசோதனை",
+        "tab_chat": "💬 மெய்நிகர் நல்வாழ்வு வழிகாட்டி",
+        "audio_label": "இருமல் அல்லது மூச்சு ஒலியைப் பதிவு செய்க",
+        "btn_analyze": "⚡ ஒலி பகுப்பாய்வைத் தொடங்கு",
+        "partner_header": "### 🏥 கூட்டாளர் மருத்துவச் சேவைகள்",
+        "btn_pharmacy": "💊 மருந்துகளை ஆர்டர் செய்க",
+        "btn_doctor": "👨‍⚕️ மருத்துவரை ஆன்லைனில் அணுகுக",
+        "res_label": "பரிசோதனை முடிவு",
+        "spec_label": "மெல்-அதிர்வெண் ஸ்பெக்ட்ரோகிராம்",
+        "ad_box": '<small style="color:gray;">விளம்பரம்</small><p><strong>N95 முகக்கவசங்கள் மற்றும் நெபுலைசர்கள்</strong> — ஒரே நாளில் டெலிவரி.</p>',
+        "quiet_err": "⚠️ ஒலி மிகவும் மெதுவாக உள்ளது. மைக்கை அருகில் வைத்து மீண்டும் முயற்சிக்கவும்.",
+        "input_err": "⚠️ தயவுசெய்து முதலில் ஆடியோவை பதிவு செய்யவும் அல்லது பதிவேற்றவும்.",
+        "patho": "🚨 சுவாசத்தில் மாறுபாடு கண்டறியப்பட்டது (வீசிங் / சளி ஒலி)",
+        "normal": "✅ வழக்கமான சுவாச ஒலி / மூச்சுப்பாதை தெளிவாக உள்ளது",
+        "fake": "🎭 செயற்கையான / தாமாகச் செய்த இருமல் கண்டறியப்பட்டது"
+    },
+    "తెలుగు (Telugu)": {
+        "title": "# 🩺 **stethol.com**",
+        "subtitle": "### *ఆధునిక శబ్ద శ్వాసకోశ పరీక్ష మరియు క్లినికల్ సహాయం*",
+        "banner": "📢 ప్రాయోజితం: 1mg మరియు అపోలో ఫార్మసీలో 20% తగ్గింపు పొందండి | కోడ్: HEALTH20",
+        "tab_screener": "🎙️ ఆడియో స్క్రీనర్",
+        "tab_chat": "💬 వర్చువల్ హెల్త్ గైడ్",
+        "audio_label": "దగ్గు లేదా శ్వాస శబ్దాన్ని రికార్డ్ చేయండి",
+        "btn_analyze": "⚡ శబ్ద విశ్లేషణను ప్రారంభించండి",
+        "partner_header": "### 🏥 భాగస్వామ్య ఆరోగ్య సేవలు",
+        "btn_pharmacy": "💊 మందులను ఆర్డర్ చేయండి",
+        "btn_doctor": "👨‍⚕️ ఆన్‌లైన్ వైద్యుడిని సంప్రదించండి",
+        "res_label": "పరీక్ష ఫలితం",
+        "spec_label": "మెల్-ఫ్రీక్వెన్సీ స్పెక్ట్రోగ్రామ్",
+        "ad_box": '<small style="color:gray;">ప్రకటన</small><p><strong>N95 మాస్క్‌లు & నెబ్యులైజర్లు</strong> — అదే రోజు డెలివరీ లభ్యం.</p>',
+        "quiet_err": "⚠️ శబ్దం చాలా తక్కువగా ఉంది. మైక్రోఫోన్‌ను దగ్గరగా ఉంచి మళ్లీ ప్రయత్నించండి.",
+        "input_err": "⚠️ దయచేసి ముందుగా ఆడియోను రికార్డ్ చేయండి లేదా అప్‌లోడ్ చేయండి.",
+        "patho": "🚨 శ్వాసకోశ అసమానత గుర్తించబడింది (వీజింగ్ / పిల్లికూతలు)",
+        "normal": "✅ సాధారణ శ్వాస ధ్వని / శ్వాస మార్గాలు స్పష్టంగా ఉన్నాయి",
+        "fake": "🎭 స్వచ్ఛంద / కృత్రిమ దగ్గు గుర్తించబడింది"
     }
 }
 
@@ -137,7 +193,7 @@ footer {visibility: hidden !important;}
 """
 
 # -------------------------------------------------------------
-# 3. AUDIO INFERENCE LOGIC
+# 4. AUDIO INFERENCE LOGIC (Memory-Safe)
 # -------------------------------------------------------------
 def analyze_audio(audio_path, language):
     lang_dict = I18N.get(language, I18N["English"])
@@ -185,33 +241,6 @@ def analyze_audio(audio_path, language):
         gc.collect()
         return f"Error: {str(e)}", None
 
-# -------------------------------------------------------------
-# 4. CHATBOT ASSISTANT
-# -------------------------------------------------------------
-def ai_assistant(message, history):
-    msg = message.lower().strip()
-    if any(k in msg for k in ["doctor", "consult", "hospital", "dr", "appointment", "डॉक्टर", "médico", "medico"]):
-        return ("🩺 **Medical Guidance / चिकित्सा सलाह:** If you have persistent coughing, shortness of breath, or fever lasting over 3 days, "
-                "consult a certified physician immediately. Use our **Consult Online Doctor** button above to connect with a specialist.")
-    elif any(k in msg for k in ["medicine", "syrup", "tablet", "pill", "antibiotic", "दवा", "दवाई", "medicamento"]):
-        return ("💊 **Pharmacy & Medication Notice:** Never take antibiotics or prescription bronchodilators without a doctor's examination. "
-                "For soothing throat irritation, warm saline gargles, honey-lemon water, or approved OTC lozenges can help. Order verified supplies via our **Order Prescriptions** link above.")
-    elif any(k in msg for k in ["fake", "voluntary", "pretend", "simulated", "नकली", "falsa", "voluntaria"]):
-        return ("🎭 **Acoustic Science:** Stetho-AI analyzes glottal rise times and frequency turbulence. Voluntary coughs lack "
-                "the sudden subglottic pressure burst and fluid micro-crackles produced during genuine involuntary airway reflexes.")
-    elif any(k in msg for k in ["wet", "dry", "mucus", "phlegm", "कफ", "बलगम", "moco", "seca"]):
-        return ("🫁 **Cough Variations:**\n"
-                "- **Dry Cough:** Irritation in the upper airway without mucus. Common in viral infections, allergies, or early asthma.\n"
-                "- **Wet / Productive Cough:** Airway contains mucus/phlegm. Typical in chest colds, bronchitis, or bacterial infections.")
-    elif any(k in msg for k in ["wheeze", "crackle", "sound", "whistle", "घरघराहट", "sibilancia"]):
-        return ("🔍 **Acoustic Markers:** Wheezing produces continuous, high-pitched whistling due to narrowed bronchial passages. "
-                "Crackles are intermittent popping sounds generated when fluid-filled airways pop open during inhalation.")
-    elif any(k in msg for k in ["hi", "hello", "hey", "नमस्ते", "hola"]):
-        return "👋 Hello! I am your Stetho-AI Health Assistant. How can I assist you with your cough assessment, symptoms, or finding medical care today?"
-    else:
-        return ("I understand you are asking about respiratory health. If you are experiencing symptoms like chest tightness, "
-                "wheezing, or breathing difficulty, please record an audio sample in the screener tab or consult a physician directly.")
-
 def change_language(selected_lang):
     d = I18N.get(selected_lang, I18N["English"])
     banner_html = f'<div class="sponsor-banner">{d["banner"]}</div>'
@@ -229,23 +258,23 @@ def change_language(selected_lang):
     ]
 
 # -------------------------------------------------------------
-# 5. UI LAYOUT
+# 5. UI LAYOUT & ATTACHMENTS
 # -------------------------------------------------------------
-with gr.Blocks(css=custom_css, title="Stetho-AI") as demo:
+with gr.Blocks(css=custom_css, title="stethol.com") as demo:
     with gr.Row():
         with gr.Column(scale=8):
             header = gr.Markdown(f"{I18N['English']['title']}\n{I18N['English']['subtitle']}")
         with gr.Column(scale=4):
             lang_selector = gr.Dropdown(
-                ["English", "हिन्दी (Hindi)", "Español"],
+                ["English", "हिन्दी (Hindi)", "தமிழ் (Tamil)", "తెలుగు (Telugu)"],
                 value="English",
-                label="🌐 Select Language / भाषा चुनें"
+                label="🌐 Select Language / மொழியைத் தேர்ந்தெடுக்கவும் / భాషను ఎంచుకోండి"
             )
     
     banner = gr.HTML(f'<div class="sponsor-banner">{I18N["English"]["banner"]}</div>')
 
     with gr.Tabs():
-        with gr.TabItem("🎙️ Stetho Screener"):
+        with gr.TabItem("🎙️ stethol.com Screener"):
             with gr.Row():
                 with gr.Column():
                     audio_input = gr.Audio(sources=["microphone", "upload"], type="filepath", label=I18N["English"]["audio_label"])
@@ -264,7 +293,10 @@ with gr.Blocks(css=custom_css, title="Stetho-AI") as demo:
                 ad_box = gr.HTML(f'<div class="ad-box" style="width:100%; margin-top:15px;">{I18N["English"]["ad_box"]}</div>')
 
         with gr.TabItem("💬 Virtual Health Guide"):
-            gr.ChatInterface(fn=ai_assistant, description="Ask Stetho-AI questions about cough sounds, symptoms, home care, or finding a specialist.")
+            gr.ChatInterface(
+                fn=dynamic_chat,
+                description="Powered by Gemini: Ask real-time questions about your symptoms, cough characteristics, or recovery steps in English, Hindi, Tamil, Telugu, or Hinglish."
+            )
 
     lang_selector.change(
         fn=change_language,
