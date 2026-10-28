@@ -1,5 +1,7 @@
 import os
 import gc
+import json
+import requests
 import urllib.request
 import torch
 
@@ -16,9 +18,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-
-from google import genai
-from google.genai import types
 
 # -------------------------------------------------------------
 # 1. AUTO-DOWNLOAD MODEL FROM GITHUB RELEASE
@@ -40,48 +39,55 @@ model.eval()
 gc.collect()
 
 # -------------------------------------------------------------
-# 2. GEMINI LIVE CHATBOT CLIENT INITIALIZATION
+# 2. GEMINI LIVE CHATBOT (Direct REST API, Zero Conflict)
 # -------------------------------------------------------------
 gemini_api_key = os.environ.get("GEMINI_API_KEY")
-ai_client = genai.Client(api_key=gemini_api_key) if gemini_api_key else None
 
-SYSTEM_INSTRUCTION = """
-You are the certified clinical triage guide for 'stethol.com', an advanced acoustic respiratory screening platform.
-Your goals:
-- Discuss cough types (dry, wet, paroxysmal, barky), lung sounds (wheezing, crackles, stridor), and respiratory comfort tips.
-- Automatically respond in whatever language the user asks in (English, Hindi, Hinglish, Tamil, Telugu, etc.).
-- Always maintain clear triage boundaries: provide informational triage, not a formal medical diagnosis.
-- If symptoms indicate an emergency (shortness of breath at rest, blood in sputum, chest pain, high fever >3 days), urge immediate consultation with a doctor or emergency services.
-- Seamlessly point users to stethol.com's partner services (ordering medicine or consulting an online doctor) when appropriate.
-- Keep answers warm, concise, and cleanly structured with bullet points.
-"""
+SYSTEM_INSTRUCTION = (
+    "You are the certified clinical triage guide for 'stethol.com', an advanced acoustic respiratory screening platform. "
+    "Your goals: "
+    "1. Discuss cough types (dry, wet, paroxysmal, barky), lung sounds (wheezing, crackles, stridor), and respiratory comfort tips. "
+    "2. Automatically respond in whatever language the user asks in (English, Hindi, Hinglish, Tamil, Telugu, etc.). "
+    "3. Maintain clear triage boundaries: provide informational triage, not a formal medical diagnosis. "
+    "4. If symptoms indicate an emergency (shortness of breath at rest, blood in sputum, chest pain, high fever >3 days), urge immediate consultation with a doctor. "
+    "5. Point users to stethol.com's partner services (ordering medicine or consulting an online doctor) when appropriate. "
+    "Keep answers warm, concise, and structured with bullet points."
+)
 
 def dynamic_chat(message, history):
-    if not ai_client:
+    if not gemini_api_key:
         return "⚠️ Chatbot API key not detected. Please verify GEMINI_API_KEY is configured in your Render Environment settings."
     
     try:
-        # Reconstruct chat history so Gemini has multi-turn context
+        # Reconstruct chat history into Gemini API payload format
         contents = []
         for turn in history:
             user_msg = turn[0]
             bot_msg = turn[1]
             if user_msg:
-                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=str(user_msg))]))
+                contents.append({"role": "user", "parts": [{"text": str(user_msg)}]})
             if bot_msg:
-                contents.append(types.Content(role="model", parts=[types.Part.from_text(text=str(bot_msg))]))
+                contents.append({"role": "model", "parts": [{"text": str(bot_msg)}]})
         
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=str(message))]))
+        contents.append({"role": "user", "parts": [{"text": str(message)}]})
 
-        response = ai_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=0.3
-            )
-        )
-        return response.text
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_api_key}"
+        payload = {
+            "system_instruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
+            "contents": contents,
+            "generationConfig": {"temperature": 0.3}
+        }
+        
+        resp = requests.post(api_url, json=payload, timeout=20)
+        data = resp.json()
+        
+        if "candidates" in data and len(data["candidates"]) > 0:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        elif "error" in data:
+            return f"API Error: {data['error'].get('message', 'Unknown issue')}"
+        else:
+            return "Unable to process the query right now. Please try again."
+
     except Exception as e:
         return f"Service temporarily busy. Please try again shortly. (Error: {str(e)})"
 
