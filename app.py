@@ -11,6 +11,13 @@ torch.set_grad_enabled(False)
 
 import gradio as gr
 import fasttransform
+
+# Patch fasttransform.Transform to accept 0 arguments during unpickling
+_orig_init = fasttransform.Transform.__init__
+def _safe_init(self, f=None, *args, **kwargs):
+    _orig_init(self, f, *args, **kwargs)
+fasttransform.Transform.__init__ = _safe_init
+
 from fastai.vision.all import *
 import librosa
 import librosa.display
@@ -59,7 +66,6 @@ def dynamic_chat(message, history):
         return "⚠️ Chatbot API key not detected. Please verify GEMINI_API_KEY is configured in your Render Environment settings."
     
     try:
-        # Reconstruct chat history into Gemini API payload format
         contents = []
         for turn in history:
             user_msg = turn[0]
