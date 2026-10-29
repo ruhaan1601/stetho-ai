@@ -12,11 +12,27 @@ torch.set_grad_enabled(False)
 import gradio as gr
 import fasttransform
 
-# Patch fasttransform.Transform to accept 0 arguments during unpickling
-_orig_init = fasttransform.Transform.__init__
-def _safe_init(self, f=None, *args, **kwargs):
-    _orig_init(self, f, *args, **kwargs)
-fasttransform.Transform.__init__ = _safe_init
+# Patch fasttransform to allow 0-argument creation during unpickling
+try:
+    _orig_new = fasttransform.Transform.__new__
+    def _safe_new(cls, *args, **kwargs):
+        try:
+            return _orig_new(cls, *args, **kwargs)
+        except TypeError:
+            return _orig_new(cls, lambda x: x)
+    fasttransform.Transform.__new__ = _safe_new
+except Exception:
+    pass
+
+try:
+    _orig_init = fasttransform.Transform.__init__
+    def _safe_init(self, f=None, *args, **kwargs):
+        if f is None:
+            f = lambda x: x
+        _orig_init(self, f, *args, **kwargs)
+    fasttransform.Transform.__init__ = _safe_init
+except Exception:
+    pass
 
 from fastai.vision.all import *
 import librosa
