@@ -10,29 +10,8 @@ import torch
 torch.set_num_threads(1)
 torch.set_grad_enabled(False)
 
-# -------------------------------------------------------------
-# UNPICKLER INTERCEPTION (Bypasses fasttransform Positional Arg Bug)
-# -------------------------------------------------------------
-class SafeUnpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        if 'fasttransform' in module or name == 'Transform':
-            class DummyTransform:
-                def __init__(self, *args, **kwargs): pass
-                def __call__(self, x, *args, **kwargs): return x
-                def decode(self, x, *args, **kwargs): return x
-                def setups(self, *args, **kwargs): pass
-            return DummyTransform
-        return super().find_class(module, name)
-
-def safe_load(f, map_location=None, pickle_module=pickle, **kwargs):
-    if isinstance(f, (str, os.PathLike)):
-        with open(f, 'rb') as fb:
-            return SafeUnpickler(fb).load()
-    return SafeUnpickler(f).load()
-
-torch.load = safe_load
-
 import gradio as gr
+import torch.serialization
 from fastai.vision.all import *
 import librosa
 import librosa.display
@@ -55,13 +34,28 @@ if not os.path.exists(MODEL_FILE):
     urllib.request.urlretrieve(MODEL_URL, MODEL_FILE)
     print("Model downloaded successfully!")
 
+# Subclass PyTorch's own unpickler so persistent IDs (tensor storage) work cleanly
+class PatchedUnpickler(torch.serialization._Unpickler):
+    def find_class(self, module, name):
+        if 'fasttransform' in module or name == 'Transform':
+            class DummyTransform:
+                def __init__(self, f=None, *args, **kwargs):
+                    self.f = f if f is not None else (lambda x: x)
+                def __call__(self, x, *args, **kwargs): return x
+                def decode(self, x, *args, **kwargs): return x
+                def setups(self, *args, **kwargs): pass
+            return DummyTransform
+        return super().find_class(module, name)
+
+class CustomPickleModule:
+    Unpickler = PatchedUnpickler
+    load = pickle.load
+    loads = pickle.loads
+
 # Load acoustic learner cleanly on CPU
-model = load_learner(MODEL_FILE, cpu=True)
+model = load_learner(MODEL_FILE, cpu=True, pickle_module=CustomPickleModule)
 model.eval()
 gc.collect()
-
-# Restore original torch.load after learner is in memory
-torch.load = torch.serialization.load
 
 # -------------------------------------------------------------
 # 2. GEMINI LIVE CHATBOT (Direct REST API, Zero Conflict)
