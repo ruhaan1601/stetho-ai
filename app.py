@@ -1,6 +1,7 @@
 import os
 import gc
 import json
+import pickle
 import requests
 import urllib.request
 import torch
@@ -9,31 +10,29 @@ import torch
 torch.set_num_threads(1)
 torch.set_grad_enabled(False)
 
+# -------------------------------------------------------------
+# UNPICKLER INTERCEPTION (Bypasses fasttransform Positional Arg Bug)
+# -------------------------------------------------------------
+class SafeUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if 'fasttransform' in module or name == 'Transform':
+            class DummyTransform:
+                def __init__(self, *args, **kwargs): pass
+                def __call__(self, x, *args, **kwargs): return x
+                def decode(self, x, *args, **kwargs): return x
+                def setups(self, *args, **kwargs): pass
+            return DummyTransform
+        return super().find_class(module, name)
+
+def safe_load(f, map_location=None, pickle_module=pickle, **kwargs):
+    if isinstance(f, (str, os.PathLike)):
+        with open(f, 'rb') as fb:
+            return SafeUnpickler(fb).load()
+    return SafeUnpickler(f).load()
+
+torch.load = safe_load
+
 import gradio as gr
-import fasttransform
-
-# Patch fasttransform to allow 0-argument creation during unpickling
-try:
-    _orig_new = fasttransform.Transform.__new__
-    def _safe_new(cls, *args, **kwargs):
-        try:
-            return _orig_new(cls, *args, **kwargs)
-        except TypeError:
-            return _orig_new(cls, lambda x: x)
-    fasttransform.Transform.__new__ = _safe_new
-except Exception:
-    pass
-
-try:
-    _orig_init = fasttransform.Transform.__init__
-    def _safe_init(self, f=None, *args, **kwargs):
-        if f is None:
-            f = lambda x: x
-        _orig_init(self, f, *args, **kwargs)
-    fasttransform.Transform.__init__ = _safe_init
-except Exception:
-    pass
-
 from fastai.vision.all import *
 import librosa
 import librosa.display
@@ -60,6 +59,9 @@ if not os.path.exists(MODEL_FILE):
 model = load_learner(MODEL_FILE, cpu=True)
 model.eval()
 gc.collect()
+
+# Restore original torch.load after learner is in memory
+torch.load = torch.serialization.load
 
 # -------------------------------------------------------------
 # 2. GEMINI LIVE CHATBOT (Direct REST API, Zero Conflict)
