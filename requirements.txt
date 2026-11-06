@@ -1,0 +1,9 @@
+streamlit
+torch
+torchvision
+librosa
+soundfile
+numpy
+google-generativeai
+Pillow
+requests
